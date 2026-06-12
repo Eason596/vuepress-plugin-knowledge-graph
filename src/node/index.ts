@@ -1,6 +1,8 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { dirname, join, posix, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { addViteOptimizeDepsInclude } from '@vuepress/helper'
+import matter from 'gray-matter'
 import type { Plugin } from 'vuepress'
 
 interface GraphNode {
@@ -9,13 +11,13 @@ interface GraphNode {
   path: string
   file: string
   tags: string[]
-  categories: string[]
+  kind: 'note' | 'tag' | 'attachment' | 'missing'
 }
 
 interface GraphEdge {
   source: string
   target: string
-  type: 'link' | 'tag' | 'category'
+  type: 'link' | 'tag' | 'attachment'
   label?: string
 }
 
@@ -26,8 +28,9 @@ interface PageInfo extends GraphNode {
 
 interface KnowledgeGraphOptions {
   docsDir?: string
-  includeTagEdges?: boolean
-  includeCategoryEdges?: boolean
+  includeTags?: boolean
+  includeAttachments?: boolean
+  includeMissing?: boolean
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -53,26 +56,11 @@ function walkMarkdownFiles(dir: string): string[] {
 }
 
 function parseFrontmatter(source: string): { data: Record<string, unknown>; content: string } {
-  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
-  if (!match) return { data: {}, content: source }
-
-  const data: Record<string, unknown> = {}
-  const lines = match[1].split(/\r?\n/)
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]
-    const pair = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
-    if (!pair) continue
-    const key = pair[1]
-    const raw = pair[2].trim()
-    if (raw === '') continue
-    if (raw.startsWith('[') && raw.endsWith(']')) {
-      data[key] = raw.slice(1, -1).split(',').map((item) => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
-    } else {
-      data[key] = raw.replace(/^['"]|['"]$/g, '')
-    }
+  const parsed = matter(source)
+  return {
+    data: parsed.data as Record<string, unknown>,
+    content: parsed.content
   }
-
-  return { data, content: source.slice(match[0].length) }
 }
 
 function toArray(value: unknown): string[] {
@@ -126,7 +114,7 @@ function collectPages(sourceDir: string): PageInfo[] {
       path: route,
       file: slash(relative(sourceDir, file)),
       tags: toArray(data.tags ?? data.tag),
-      categories: toArray(data.categories ?? data.category),
+      kind: 'note',
       aliases: [],
       content
     }
@@ -146,8 +134,8 @@ function resolveTarget(rawTarget: string, page: PageInfo, aliases: Map<string, s
 
   const candidates = new Set<string>([target, target.toLowerCase()])
   if (target.startsWith('./') || target.startsWith('../')) {
-    const pageDir = dirname(page.id)
-    const normalized = slash(resolve('/', pageDir, target)).replace(/^\//, '')
+    const pageDir = posix.dirname(page.id)
+    const normalized = posix.resolve('/', pageDir, target).replace(/^\//, '')
     candidates.add(normalized)
     candidates.add(normalized.toLowerCase())
   }
@@ -162,7 +150,11 @@ function resolveTarget(rawTarget: string, page: PageInfo, aliases: Map<string, s
   return null
 }
 
-function collectEdges(pages: PageInfo[], options: Required<Pick<KnowledgeGraphOptions, 'includeTagEdges' | 'includeCategoryEdges'>>): GraphEdge[] {
+function collectGraph(
+  sourceDir: string,
+  pages: PageInfo[],
+  options: Required<Pick<KnowledgeGraphOptions, 'includeTags' | 'includeAttachments' | 'includeMissing'>>
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const aliases = new Map<string, string>()
   for (const page of pages) {
     for (const alias of page.aliases) {
@@ -173,65 +165,137 @@ function collectEdges(pages: PageInfo[], options: Required<Pick<KnowledgeGraphOp
 
   const edgeKeys = new Set<string>()
   const edges: GraphEdge[] = []
+  const extraNodes = new Map<string, GraphNode>()
   const addEdge = (source: string, target: string, type: GraphEdge['type'], label?: string): void => {
     if (!source || !target || source === target) return
     const key = type === 'link'
-      ? `${source}->${target}:${type}`
-      : [source, target].sort().join('--') + `:${type}:${label ?? ''}`
+      ? [source, target].sort().join('--') + `:${type}`
+      : `${source}->${target}:${type}:${label ?? ''}`
     if (edgeKeys.has(key)) return
     edgeKeys.add(key)
     edges.push({ source, target, type, label })
   }
+  const addExtraNode = (node: GraphNode): void => {
+    if (!extraNodes.has(node.id)) extraNodes.set(node.id, node)
+  }
+  const decodeTarget = (value: string): string => {
+    try {
+      return decodeURI(value)
+    } catch {
+      return value
+    }
+  }
+  const normalizeAsset = (rawTarget: string, page: PageInfo): { id: string; title: string; path: string; file: string } | null => {
+    const target = decodeTarget(rawTarget.split(/[?#]/)[0].trim()).replace(/\\/g, '/')
+    if (!target || /^(?:https?:|mailto:|data:|#)/i.test(target) || /\.md$/i.test(target)) return null
+    const pageDir = posix.dirname(page.file)
+    const relativeFile = target.startsWith('/')
+      ? target.replace(/^\/+/, '')
+      : posix.resolve('/', pageDir, target).replace(/^\/+/, '')
+    const sourceRoot = resolve(sourceDir)
+    const absoluteFile = resolve(sourceRoot, relativeFile)
+    const publicFile = resolve(sourceRoot, '.vuepress/public', relativeFile)
+    if (!absoluteFile.startsWith(sourceRoot)) return null
+    if (!existsSync(absoluteFile) && !existsSync(publicFile)) return null
+    const title = relativeFile.split('/').pop() ?? relativeFile
+    return {
+      id: `attachment:${relativeFile}`,
+      title,
+      path: target.startsWith('/') ? target : `/${relativeFile}`,
+      file: relativeFile
+    }
+  }
+  const addMissingNode = (rawTarget: string, page: PageInfo): string | null => {
+    const target = decodeTarget(rawTarget.split('#')[0].trim()).replace(/\\/g, '/').replace(/\.md$/i, '')
+    if (!target) return null
+    const pageDir = posix.dirname(page.id)
+    const normalized = target.startsWith('/')
+      ? target.replace(/^\/+/, '')
+      : posix.resolve('/', pageDir, target).replace(/^\/+/, '')
+    if (!normalized || normalized === '.') return null
+    const id = `missing:${normalized.toLowerCase()}`
+    addExtraNode({
+      id,
+      title: target.split('/').pop() ?? target,
+      path: '',
+      file: normalized,
+      tags: [],
+      kind: 'missing'
+    })
+    return id
+  }
 
   for (const page of pages) {
     for (const match of page.content.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
-      const target = resolveTarget(match[1], page, aliases)
+      const rawTarget = match[1]
+      const asset = options.includeAttachments ? normalizeAsset(rawTarget, page) : null
+      if (asset && /\.[a-z0-9]{1,12}$/i.test(asset.file)) {
+        addExtraNode({ ...asset, tags: [], kind: 'attachment' })
+        addEdge(page.id, asset.id, 'attachment')
+        continue
+      }
+      const target = resolveTarget(rawTarget, page, aliases)
       if (target) addEdge(page.id, target, 'link')
+      else if (options.includeMissing) {
+        const missing = addMissingNode(rawTarget, page)
+        if (missing) addEdge(page.id, missing, 'link')
+      }
     }
-    for (const match of page.content.matchAll(/\[[^\]]+\]\((?!https?:|mailto:|#)([^)]+)\)/g)) {
-      const target = resolveTarget(decodeURI(match[1].split(/\s+/)[0]), page, aliases)
+    for (const match of page.content.matchAll(/!?\[[^\]]*\]\((?!https?:|mailto:|data:|#)([^)]+)\)/gi)) {
+      const rawTarget = match[1].trim().replace(/\s+["'][^"']*["']$/, '')
+      const asset = options.includeAttachments ? normalizeAsset(rawTarget, page) : null
+      if (asset && /\.[a-z0-9]{1,12}$/i.test(asset.file) && !/\.md$/i.test(asset.file)) {
+        addExtraNode({ ...asset, tags: [], kind: 'attachment' })
+        addEdge(page.id, asset.id, 'attachment')
+        continue
+      }
+      const target = resolveTarget(decodeTarget(rawTarget), page, aliases)
       if (target) addEdge(page.id, target, 'link')
+      else if (options.includeMissing) {
+        const missing = addMissingNode(rawTarget, page)
+        if (missing) addEdge(page.id, missing, 'link')
+      }
+    }
+    if (options.includeTags) {
+      for (const rawTag of page.tags) {
+        const tag = rawTag.trim()
+        if (!tag) continue
+        const id = `tag:${tag.toLowerCase()}`
+        addExtraNode({
+          id,
+          title: `#${tag}`,
+          path: '',
+          file: '',
+          tags: [tag],
+          kind: 'tag'
+        })
+        addEdge(page.id, id, 'tag', tag)
+      }
     }
   }
 
-  const connectBy = (field: 'tags' | 'categories', type: 'tag' | 'category'): void => {
-    const groups = new Map<string, PageInfo[]>()
-    for (const page of pages) {
-      for (const item of page[field]) {
-        const key = item.trim()
-        if (!key) continue
-        groups.set(key, [...(groups.get(key) ?? []), page])
-      }
-    }
-    for (const [label, group] of groups) {
-      for (let i = 0; i < group.length; i += 1) {
-        for (let j = i + 1; j < group.length; j += 1) {
-          addEdge(group[i].id, group[j].id, type, label)
-        }
-      }
-    }
-  }
-
-  if (options.includeTagEdges) connectBy('tags', 'tag')
-  if (options.includeCategoryEdges) connectBy('categories', 'category')
-  return edges
+  const noteNodes: GraphNode[] = pages.map(({ content: _content, aliases: _aliases, ...node }) => node)
+  return { nodes: [...noteNodes, ...extraNodes.values()], edges }
 }
 
 export function knowledgeGraphPlugin(options: KnowledgeGraphOptions = {}): Plugin {
   return {
     name: 'vuepress-plugin-knowledge-graph',
     clientConfigFile: slash(join(__dirname, '../client/config.ts')),
+    extendsBundlerOptions(bundlerOptions, app) {
+      addViteOptimizeDepsInclude(bundlerOptions, app, 'force-graph')
+    },
     async onPrepared(app) {
       const sourceDir = options.docsDir ? resolve(options.docsDir) : app.dir.source()
       const pages = collectPages(sourceDir)
-      const edges = collectEdges(pages, {
-        includeTagEdges: options.includeTagEdges ?? true,
-        includeCategoryEdges: options.includeCategoryEdges ?? true
+      const graph = collectGraph(sourceDir, pages, {
+        includeTags: options.includeTags ?? true,
+        includeAttachments: options.includeAttachments ?? true,
+        includeMissing: options.includeMissing ?? true
       })
-      const nodes: GraphNode[] = pages.map(({ content: _content, aliases: _aliases, ...node }) => node)
       await app.writeTemp(
         'knowledge-graph/data.js',
-        `export const knowledgeGraphData = ${JSON.stringify({ nodes, edges }, null, 2)}\n`
+        `export const knowledgeGraphData = ${JSON.stringify(graph, null, 2)}\n`
       )
     }
   }

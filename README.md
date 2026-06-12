@@ -1,18 +1,19 @@
 # vuepress-plugin-knowledge-graph
 
-一个用于 VuePress 2 的知识图谱插件。在构建阶段扫描 Markdown 文件，根据 Obsidian 风格双链、相对链接、标签和分类生成关系图，并在站点右下角提供可打开、可拖拽宽度的图谱侧边栏。
+一个用于 VuePress 2 的知识图谱插件。在构建阶段扫描 Markdown 文件，根据 Obsidian 风格双链、相对链接、标签、附件和未创建文件生成关系图，并在站点右下角提供可打开、可拖拽宽度的图谱侧边栏。
 
 ## 功能
 
 - 自动扫描 VuePress 文档目录下的 `**/*.md`
 - 支持 Obsidian 双链：`[[目标页面]]`、`[[目标页面|显示文本]]`、`[[目标页面#标题]]`
 - 支持相对 Markdown 链接：`[标题](./目标页面.md)`
-- 可选根据 `tags` / `tag` 建立标签关系边
-- 可选根据 `categories` / `category` 建立分类关系边
+- 将 `tags` / `tag` 生成为独立标签节点
+- 将 Markdown 引用的本地非 Markdown 文件生成为附件节点
+- 将无法解析的内部链接生成为半透明未创建文件节点
 - 右下角悬浮按钮打开图谱侧边栏
 - 侧边栏可拖拽调整宽度
 - 打开图谱时自动聚焦当前页面节点
-- 双击节点跳转到对应页面
+- 单击节点跳转到对应页面
 - 鼠标悬停时高亮关联节点与边
 
 ## 环境要求
@@ -63,16 +64,18 @@ export default defineUserConfig({
 ```typescript
 knowledgeGraphPlugin({
   docsDir: '/absolute/path/to/docs',
-  includeTagEdges: true,
-  includeCategoryEdges: true,
+  includeTags: true,
+  includeAttachments: true,
+  includeMissing: true,
 })
 ```
 
 | 选项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `docsDir` | `string` | VuePress `source` 目录 | Markdown 扫描根目录，通常无需手动设置 |
-| `includeTagEdges` | `boolean` | `true` | 是否为相同标签的页面建立连接 |
-| `includeCategoryEdges` | `boolean` | `true` | 是否为相同分类的页面建立连接 |
+| `includeTags` | `boolean` | `true` | 是否生成独立标签节点 |
+| `includeAttachments` | `boolean` | `true` | 是否生成本地附件节点 |
+| `includeMissing` | `boolean` | `true` | 是否生成未创建文件节点 |
 
 ## 建立页面关系
 
@@ -89,17 +92,16 @@ knowledgeGraphPlugin({
 [查看相关笔记](./related.md)
 ```
 
-### Frontmatter 标签与分类
+### Frontmatter 标签
 
 ```markdown
 ---
 title: Segment Anything
 tags: [vision, foundation-model]
-categories: [paper]
 ---
 ```
 
-相同 `tags` 或 `categories` 的页面会在图谱中通过对应类型的边连接（可在配置中关闭）。
+每个唯一标签会生成一个独立节点，并连接所有使用该标签的页面。
 
 ## 在页面中嵌入完整图谱
 
@@ -115,7 +117,8 @@ categories: [paper]
 | --- | --- |
 | 点击右下角按钮 | 打开 / 关闭图谱侧边栏 |
 | 拖拽侧边栏左边缘 | 调整宽度 |
-| 双击节点 | 跳转到对应页面 |
+| 单击节点 | 跳转到对应页面 |
+| 拖动节点 | 调整节点位置，松开后继续参与布局 |
 | 悬停节点 | 高亮该节点及其关联节点、边 |
 | 打开侧边栏 | 自动聚焦当前页面节点 |
 

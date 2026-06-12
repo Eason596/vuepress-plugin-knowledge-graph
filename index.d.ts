@@ -2,8 +2,9 @@ import type { Plugin } from 'vuepress'
 
 export interface KnowledgeGraphOptions {
   docsDir?: string
-  includeTagEdges?: boolean
-  includeCategoryEdges?: boolean
+  includeTags?: boolean
+  includeAttachments?: boolean
+  includeMissing?: boolean
 }
 
 export declare function knowledgeGraphPlugin(options?: KnowledgeGraphOptions): Plugin
