@@ -1,6 +1,6 @@
 {
   "name": "vuepress-plugin-knowledge-graph",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A VuePress 2 plugin that generates an Obsidian-like knowledge graph from Markdown links, tags, attachments, and unresolved links.",
   "keywords": [
     "vuepress",
