@@ -403,7 +403,6 @@ function focusActivePath(): void {
 }
 
 function arrangeFilteredNodes(): void {
-  if (!searchActive.value && !localMode.value) return
   const visibleNodes = nodes
     .filter((node) => visibleNodeIds.value.has(node.id))
     .sort((left, right) => right.degree - left.degree)
